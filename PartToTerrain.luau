@@ -1,0 +1,661 @@
+--!strict
+-- ==============================================================================
+-- Part to Terrain Converter Plugin for Roblox Studio
+-- ==============================================================================
+
+local Selection = game:GetService("Selection")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local Terrain = workspace.Terrain
+
+if not plugin then
+	warn("[Part to Terrain] This script is designed to run as a Roblox Studio Plugin.")
+	warn("[Part to Terrain] Cara pakai: Klik kanan script ini di Explorer -> 'Save as Local Plugin...'.")
+	return
+end
+
+-- Plugin Toolbar & Action Button
+local toolbar = plugin:CreateToolbar("Terrain Tools")
+local toggleButton = toolbar:CreateButton(
+	"PartToTerrain",
+	"Convert selected Parts into Smooth Terrain",
+	"rbxassetid://6031280882"
+)
+toggleButton.ClickableWhenViewportHidden = true
+
+-- Create DockWidget
+local widgetInfo = DockWidgetPluginGuiInfo.new(
+	Enum.InitialDockState.Float,
+	false, -- initially enabled
+	false, -- override previous state
+	340,   -- default width
+	490,   -- default height
+	280,   -- min width
+	380    -- min height
+)
+
+local widget = plugin:CreateDockWidgetPluginGui("PartToTerrainWidget_v2", widgetInfo)
+widget.Title = "Part to Terrain Converter"
+widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- Settings & State
+local options = {
+	material = "Auto",
+	materialName = "Auto (Gunakan Material Part)",
+	deleteParts = true,
+	includeChildren = true,
+	detectShapes = true,
+}
+
+local MATERIALS = {
+	{ name = "Auto (Gunakan Material Part)", value = "Auto" },
+	{ name = "Grass (Rumput)", value = Enum.Material.Grass },
+	{ name = "Rock (Batu)", value = Enum.Material.Rock },
+	{ name = "Sand (Pasir)", value = Enum.Material.Sand },
+	{ name = "Water (Air)", value = Enum.Material.Water },
+	{ name = "Mud (Lumpur)", value = Enum.Material.Mud },
+	{ name = "Ground (Tanah)", value = Enum.Material.Ground },
+	{ name = "Leafy Grass (Rumput Berdaun)", value = Enum.Material.LeafyGrass },
+	{ name = "Snow (Salju)", value = Enum.Material.Snow },
+	{ name = "Ice (Es)", value = Enum.Material.Ice },
+	{ name = "Concrete (Beton)", value = Enum.Material.Concrete },
+	{ name = "Brick (Bata)", value = Enum.Material.Brick },
+	{ name = "Wood Planks (Papan Kayu)", value = Enum.Material.WoodPlanks },
+	{ name = "Cobblestone (Batu Kerikil)", value = Enum.Material.Cobblestone },
+	{ name = "Slate (Batu Tulis)", value = Enum.Material.Slate },
+	{ name = "Basalt (Basal)", value = Enum.Material.Basalt },
+	{ name = "Cracked Lava (Lava)", value = Enum.Material.CrackedLava },
+	{ name = "Limestone (Batu Kapur)", value = Enum.Material.Limestone },
+	{ name = "Sandstone (Batu Pasir)", value = Enum.Material.Sandstone },
+	{ name = "Asphalt (Aspal)", value = Enum.Material.Asphalt },
+	{ name = "Pebble (Kerikil Halus)", value = Enum.Material.Pebble },
+	{ name = "Glacier (Gletser)", value = Enum.Material.Glacier },
+	{ name = "Salt (Garam)", value = Enum.Material.Salt },
+}
+
+-- Safe Studio Theme helper
+local function getStudioColor(styleColor, modifier)
+	local success, col = pcall(function()
+		local sTheme = settings().Studio.Theme
+		return sTheme:GetColor(styleColor, modifier or Enum.StudioStyleGuideModifier.Default)
+	end)
+	if success and typeof(col) == "Color3" then
+		return col
+	end
+	return Color3.fromRGB(46, 46, 46)
+end
+
+-- Build UI Elements
+local mainContainer = Instance.new("ScrollingFrame")
+mainContainer.Name = "MainContainer"
+mainContainer.Size = UDim2.new(1, 0, 1, 0)
+mainContainer.BorderSizePixel = 0
+mainContainer.ScrollBarThickness = 5
+mainContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+mainContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+mainContainer.Parent = widget
+
+local pad = Instance.new("UIPadding")
+pad.PaddingTop = UDim.new(0, 12)
+pad.PaddingBottom = UDim.new(0, 16)
+pad.PaddingLeft = UDim.new(0, 12)
+pad.PaddingRight = UDim.new(0, 12)
+pad.Parent = mainContainer
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 10)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = mainContainer
+
+-- Helper for card containers
+local function createCard(name, order)
+	local card = Instance.new("Frame")
+	card.Name = name
+	card.LayoutOrder = order
+	card.Size = UDim2.new(1, 0, 0, 0)
+	card.AutomaticSize = Enum.AutomaticSize.Y
+	card.BorderSizePixel = 0
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = card
+	
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 1
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = card
+	
+	local cPad = Instance.new("UIPadding")
+	cPad.PaddingTop = UDim.new(0, 10)
+	cPad.PaddingBottom = UDim.new(0, 10)
+	cPad.PaddingLeft = UDim.new(0, 10)
+	cPad.PaddingRight = UDim.new(0, 10)
+	cPad.Parent = card
+	
+	local cLayout = Instance.new("UIListLayout")
+	cLayout.Padding = UDim.new(0, 8)
+	cLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	cLayout.Parent = card
+	
+	card.Parent = mainContainer
+	return card, stroke
+end
+
+-- 1. Header & Selection Card
+local selCard, selStroke = createCard("SelectionCard", 1)
+
+local selTopRow = Instance.new("Frame")
+selTopRow.Name = "TopRow"
+selTopRow.Size = UDim2.new(1, 0, 0, 22)
+selTopRow.BackgroundTransparency = 1
+selTopRow.LayoutOrder = 1
+selTopRow.Parent = selCard
+
+local selHeader = Instance.new("TextLabel")
+selHeader.Text = "PART TO TERRAIN"
+selHeader.Font = Enum.Font.SourceSansBold
+selHeader.TextSize = 13
+selHeader.TextXAlignment = Enum.TextXAlignment.Left
+selHeader.Size = UDim2.new(1, -72, 1, 0)
+selHeader.BackgroundTransparency = 1
+selHeader.Parent = selTopRow
+
+local refreshBtn = Instance.new("TextButton")
+refreshBtn.Name = "RefreshBtn"
+refreshBtn.Size = UDim2.new(0, 70, 0, 22)
+refreshBtn.Position = UDim2.new(1, -70, 0, 0)
+refreshBtn.Font = Enum.Font.SourceSans
+refreshBtn.TextSize = 12
+refreshBtn.Text = "🔄 Refresh"
+refreshBtn.BorderSizePixel = 0
+refreshBtn.AutoButtonColor = true
+
+local refCorner = Instance.new("UICorner")
+refCorner.CornerRadius = UDim.new(0, 3)
+refCorner.Parent = refreshBtn
+
+local refStroke = Instance.new("UIStroke")
+refStroke.Thickness = 1
+refStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+refStroke.Parent = refreshBtn
+refreshBtn.Parent = selTopRow
+
+local selCountLabel = Instance.new("TextLabel")
+selCountLabel.Text = "Part Terpilih: 0"
+selCountLabel.Font = Enum.Font.SourceSansSemibold
+selCountLabel.TextSize = 15
+selCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+selCountLabel.Size = UDim2.new(1, 0, 0, 20)
+selCountLabel.BackgroundTransparency = 1
+selCountLabel.LayoutOrder = 2
+selCountLabel.Parent = selCard
+
+local selSubLabel = Instance.new("TextLabel")
+selSubLabel.Text = "Pilih part di Viewport atau Explorer."
+selSubLabel.Font = Enum.Font.SourceSans
+selSubLabel.TextSize = 12
+selSubLabel.TextXAlignment = Enum.TextXAlignment.Left
+selSubLabel.Size = UDim2.new(1, 0, 0, 14)
+selSubLabel.BackgroundTransparency = 1
+selSubLabel.LayoutOrder = 3
+selSubLabel.Parent = selCard
+
+-- 2. Material Selector Card
+local matCard, matStroke = createCard("MaterialCard", 2)
+
+local matHeader = Instance.new("TextLabel")
+matHeader.Text = "TARGET MATERIAL"
+matHeader.Font = Enum.Font.SourceSansBold
+matHeader.TextSize = 12
+matHeader.TextXAlignment = Enum.TextXAlignment.Left
+matHeader.Size = UDim2.new(1, 0, 0, 16)
+matHeader.BackgroundTransparency = 1
+matHeader.LayoutOrder = 1
+matHeader.Parent = matCard
+
+-- Dropdown Button
+local matDropdownBtn = Instance.new("TextButton")
+matDropdownBtn.Name = "DropdownBtn"
+matDropdownBtn.Size = UDim2.new(1, 0, 0, 32)
+matDropdownBtn.Font = Enum.Font.SourceSansSemibold
+matDropdownBtn.TextSize = 13
+matDropdownBtn.Text = "  " .. options.materialName .. "  ▼"
+matDropdownBtn.TextXAlignment = Enum.TextXAlignment.Left
+matDropdownBtn.BorderSizePixel = 0
+matDropdownBtn.LayoutOrder = 2
+matDropdownBtn.AutoButtonColor = false
+
+local btnCorner = Instance.new("UICorner")
+btnCorner.CornerRadius = UDim.new(0, 4)
+btnCorner.Parent = matDropdownBtn
+
+local btnStroke = Instance.new("UIStroke")
+btnStroke.Thickness = 1
+btnStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+btnStroke.Parent = matDropdownBtn
+matDropdownBtn.Parent = matCard
+
+-- Dropdown List Container
+local matListFrame = Instance.new("ScrollingFrame")
+matListFrame.Name = "MaterialList"
+matListFrame.Size = UDim2.new(1, 0, 0, 160)
+matListFrame.BorderSizePixel = 0
+matListFrame.ScrollBarThickness = 4
+matListFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+matListFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+matListFrame.Visible = false
+matListFrame.LayoutOrder = 3
+
+local mlCorner = Instance.new("UICorner")
+mlCorner.CornerRadius = UDim.new(0, 4)
+mlCorner.Parent = matListFrame
+
+local mlStroke = Instance.new("UIStroke")
+mlStroke.Thickness = 1
+mlStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+mlStroke.Parent = matListFrame
+
+local mlLayout = Instance.new("UIListLayout")
+mlLayout.Padding = UDim.new(0, 2)
+mlLayout.SortOrder = Enum.SortOrder.LayoutOrder
+mlLayout.Parent = matListFrame
+
+local mlPad = Instance.new("UIPadding")
+mlPad.PaddingTop = UDim.new(0, 4)
+mlPad.PaddingBottom = UDim.new(0, 4)
+mlPad.PaddingLeft = UDim.new(0, 4)
+mlPad.PaddingRight = UDim.new(0, 4)
+mlPad.Parent = matListFrame
+matListFrame.Parent = matCard
+
+matDropdownBtn.MouseButton1Click:Connect(function()
+	matListFrame.Visible = not matListFrame.Visible
+	matDropdownBtn.Text = "  " .. options.materialName .. (matListFrame.Visible and "  ▲" or "  ▼")
+end)
+
+local materialButtons = {}
+for i, item in ipairs(MATERIALS) do
+	local mBtn = Instance.new("TextButton")
+	mBtn.Name = "Mat_" .. tostring(i)
+	mBtn.Size = UDim2.new(1, 0, 0, 26)
+	mBtn.Font = Enum.Font.SourceSans
+	mBtn.TextSize = 13
+	mBtn.Text = "  " .. item.name
+	mBtn.TextXAlignment = Enum.TextXAlignment.Left
+	mBtn.BorderSizePixel = 0
+	mBtn.LayoutOrder = i
+	
+	local mCorner = Instance.new("UICorner")
+	mCorner.CornerRadius = UDim.new(0, 3)
+	mCorner.Parent = mBtn
+	
+	mBtn.MouseButton1Click:Connect(function()
+		options.material = item.value
+		options.materialName = item.name
+		matDropdownBtn.Text = "  " .. options.materialName .. "  ▼"
+		matListFrame.Visible = false
+	end)
+	
+	mBtn.Parent = matListFrame
+	table.insert(materialButtons, mBtn)
+end
+
+-- 3. Options Card
+local optCard, optStroke = createCard("OptionsCard", 3)
+
+local optHeader = Instance.new("TextLabel")
+optHeader.Text = "PILIHAN KONVERSI"
+optHeader.Font = Enum.Font.SourceSansBold
+optHeader.TextSize = 12
+optHeader.TextXAlignment = Enum.TextXAlignment.Left
+optHeader.Size = UDim2.new(1, 0, 0, 16)
+optHeader.BackgroundTransparency = 1
+optHeader.LayoutOrder = 1
+optHeader.Parent = optCard
+
+local function createCheckbox(label, initialVal, order, callback)
+	local row = Instance.new("TextButton")
+	row.Size = UDim2.new(1, 0, 0, 24)
+	row.BackgroundTransparency = 1
+	row.Text = ""
+	row.LayoutOrder = order
+	
+	local box = Instance.new("Frame")
+	box.Size = UDim2.new(0, 16, 0, 16)
+	box.Position = UDim2.new(0, 0, 0.5, -8)
+	box.BorderSizePixel = 0
+	
+	local bCorner = Instance.new("UICorner")
+	bCorner.CornerRadius = UDim.new(0, 3)
+	bCorner.Parent = box
+	
+	local bStroke = Instance.new("UIStroke")
+	bStroke.Thickness = 1
+	bStroke.Parent = box
+	
+	local checkMark = Instance.new("TextLabel")
+	checkMark.Size = UDim2.new(1, 0, 1, 0)
+	checkMark.BackgroundTransparency = 1
+	checkMark.Font = Enum.Font.SourceSansBold
+	checkMark.TextSize = 13
+	checkMark.Text = initialVal and "✓" or ""
+	checkMark.Parent = box
+	box.Parent = row
+	
+	local lbl = Instance.new("TextLabel")
+	lbl.Position = UDim2.new(0, 24, 0, 0)
+	lbl.Size = UDim2.new(1, -24, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.SourceSans
+	lbl.TextSize = 13
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Text = label
+	lbl.Parent = row
+	
+	local state = initialVal
+	row.MouseButton1Click:Connect(function()
+		state = not state
+		checkMark.Text = state and "✓" or ""
+		callback(state)
+	end)
+	
+	row.Parent = optCard
+	return row, box, bStroke, checkMark, lbl
+end
+
+local _, boxDel, strokeDel, chkDel, lblDel = createCheckbox("Hapus part asli setelah dikonversi", options.deleteParts, 2, function(val)
+	options.deleteParts = val
+end)
+
+local _, boxChld, strokeChld, chkChld, lblChld = createCheckbox("Cari part di dalam Model & Folder", options.includeChildren, 3, function(val)
+	options.includeChildren = val
+end)
+
+local _, boxShp, strokeShp, chkShp, lblShp = createCheckbox("Deteksi bentuk Wedge, Ball & Cylinder", options.detectShapes, 4, function(val)
+	options.detectShapes = val
+end)
+
+-- 4. Action Buttons & Status Card
+local actCard, actStroke = createCard("ActionCard", 4)
+
+local convertBtn = Instance.new("TextButton")
+convertBtn.Name = "ConvertButton"
+convertBtn.Size = UDim2.new(1, 0, 0, 38)
+convertBtn.Font = Enum.Font.SourceSansBold
+convertBtn.TextSize = 15
+convertBtn.Text = "⚡ Konversi ke Terrain"
+convertBtn.BorderSizePixel = 0
+convertBtn.LayoutOrder = 1
+convertBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+convertBtn.BackgroundColor3 = Color3.fromRGB(0, 162, 96) -- Roblox Green
+
+local cBtnCorner = Instance.new("UICorner")
+cBtnCorner.CornerRadius = UDim.new(0, 5)
+cBtnCorner.Parent = convertBtn
+convertBtn.Parent = actCard
+
+-- Undo button row
+local undoBtn = Instance.new("TextButton")
+undoBtn.Name = "UndoButton"
+undoBtn.Size = UDim2.new(1, 0, 0, 28)
+undoBtn.Font = Enum.Font.SourceSans
+undoBtn.TextSize = 13
+undoBtn.Text = "↩ Undo (Batalkan Konversi Terakhir)"
+undoBtn.BorderSizePixel = 0
+undoBtn.LayoutOrder = 2
+
+local uBtnCorner = Instance.new("UICorner")
+uBtnCorner.CornerRadius = UDim.new(0, 4)
+uBtnCorner.Parent = undoBtn
+
+local uBtnStroke = Instance.new("UIStroke")
+uBtnStroke.Thickness = 1
+uBtnStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+uBtnStroke.Parent = undoBtn
+undoBtn.Parent = actCard
+
+-- Status Label
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "StatusLabel"
+statusLabel.Size = UDim2.new(1, 0, 0, 36)
+statusLabel.Font = Enum.Font.SourceSans
+statusLabel.TextSize = 12
+statusLabel.TextWrapped = true
+statusLabel.Text = "Siap. Pilih satu atau beberapa part lalu klik Konversi."
+statusLabel.BackgroundTransparency = 1
+statusLabel.LayoutOrder = 3
+statusLabel.Parent = actCard
+
+-- Safe Theme Styling function
+local function applyTheme()
+	pcall(function()
+		local bgCol = getStudioColor(Enum.StudioStyleGuideColor.MainBackground)
+		local cardCol = getStudioColor(Enum.StudioStyleGuideColor.TableItem)
+		local textCol = getStudioColor(Enum.StudioStyleGuideColor.MainText)
+		local subCol = getStudioColor(Enum.StudioStyleGuideColor.SubText)
+		local borderCol = getStudioColor(Enum.StudioStyleGuideColor.Border)
+		local inputCol = getStudioColor(Enum.StudioStyleGuideColor.InputFieldBackground)
+		local btnCol = getStudioColor(Enum.StudioStyleGuideColor.Button)
+		
+		mainContainer.BackgroundColor3 = bgCol
+		
+		local cards = { selCard, matCard, optCard, actCard }
+		local cardStrokes = { selStroke, matStroke, optStroke, actStroke }
+		for _, c in ipairs(cards) do
+			c.BackgroundColor3 = cardCol
+		end
+		for _, s in ipairs(cardStrokes) do
+			s.Color = borderCol
+		end
+		
+		selHeader.TextColor3 = subCol
+		selCountLabel.TextColor3 = textCol
+		selSubLabel.TextColor3 = subCol
+		
+		refreshBtn.BackgroundColor3 = btnCol
+		refreshBtn.TextColor3 = textCol
+		refStroke.Color = borderCol
+		
+		matHeader.TextColor3 = subCol
+		matDropdownBtn.BackgroundColor3 = inputCol
+		matDropdownBtn.TextColor3 = textCol
+		btnStroke.Color = borderCol
+		
+		matListFrame.BackgroundColor3 = inputCol
+		mlStroke.Color = borderCol
+		for _, b in ipairs(materialButtons) do
+			b.BackgroundColor3 = inputCol
+			b.TextColor3 = textCol
+		end
+		
+		optHeader.TextColor3 = subCol
+		lblDel.TextColor3 = textCol
+		lblChld.TextColor3 = textCol
+		lblShp.TextColor3 = textCol
+		boxDel.BackgroundColor3 = inputCol
+		strokeDel.Color = borderCol
+		boxChld.BackgroundColor3 = inputCol
+		strokeChld.Color = borderCol
+		boxShp.BackgroundColor3 = inputCol
+		strokeShp.Color = borderCol
+		chkDel.TextColor3 = Color3.fromRGB(0, 162, 96)
+		chkChld.TextColor3 = Color3.fromRGB(0, 162, 96)
+		chkShp.TextColor3 = Color3.fromRGB(0, 162, 96)
+		
+		undoBtn.BackgroundColor3 = btnCol
+		undoBtn.TextColor3 = textCol
+		uBtnStroke.Color = borderCol
+		
+		statusLabel.TextColor3 = subCol
+	end)
+end
+
+applyTheme()
+pcall(function()
+	settings().Studio.ThemeChanged:Connect(applyTheme)
+end)
+
+-- Collect parts function
+local function getTargetParts()
+	local selected = Selection:Get()
+	local parts = {}
+	local seen = {}
+	
+	local function scan(list)
+		for _, item in ipairs(list) do
+			if item:IsA("BasePart") and not item:IsA("Terrain") then
+				if not seen[item] then
+					seen[item] = true
+					table.insert(parts, item)
+				end
+			end
+			if options.includeChildren and (item:IsA("Model") or item:IsA("Folder") or item:IsA("Configuration") or item:IsA("Workspace")) then
+				scan(item:GetChildren())
+			end
+		end
+	end
+	
+	scan(selected)
+	return parts
+end
+
+-- Update Selection Counter
+local function updateSelectionCounter()
+	local parts = getTargetParts()
+	local count = #parts
+	selCountLabel.Text = string.format("Part Terpilih: %d", count)
+	if count == 0 then
+		selSubLabel.Text = "Pilih part di Viewport atau Explorer."
+		selSubLabel.TextColor3 = getStudioColor(Enum.StudioStyleGuideColor.DimmedText)
+	else
+		selSubLabel.Text = string.format("Siap mengonversi %d part.", count)
+		selSubLabel.TextColor3 = Color3.fromRGB(0, 180, 100)
+	end
+end
+
+-- Connect Events
+Selection.SelectionChanged:Connect(updateSelectionCounter)
+refreshBtn.MouseButton1Click:Connect(updateSelectionCounter)
+
+-- Connect Toolbar Button toggle
+toggleButton.Click:Connect(function()
+	widget.Enabled = not widget.Enabled
+	toggleButton:SetActive(widget.Enabled)
+	if widget.Enabled then
+		updateSelectionCounter()
+	end
+end)
+
+widget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	toggleButton:SetActive(widget.Enabled)
+	if widget.Enabled then
+		updateSelectionCounter()
+	end
+end)
+
+-- Initial count
+updateSelectionCounter()
+
+-- Conversion Logic
+local function convertPartsToTerrain()
+	local parts = getTargetParts()
+	local total = #parts
+	if total == 0 then
+		statusLabel.Text = "⚠️ Tidak ada part yang dipilih! Silakan pilih part terlebih dahulu."
+		statusLabel.TextColor3 = Color3.fromRGB(240, 150, 40)
+		return
+	end
+	
+	convertBtn.Text = "⏳ Mengonversi..."
+	convertBtn.AutoButtonColor = false
+	
+	local recordSuccess, recordId = pcall(function()
+		return ChangeHistoryService:TryBeginRecording("Convert Parts to Terrain")
+	end)
+	
+	local count = 0
+	local failed = 0
+	
+	for i, part in ipairs(parts) do
+		-- Determine material
+		local mat = options.material
+		if mat == "Auto" then
+			local success, _ = pcall(function()
+				Terrain:FillBlock(part.CFrame, Vector3.new(0.1, 0.1, 0.1), part.Material)
+			end)
+			if success then
+				mat = part.Material
+			else
+				mat = Enum.Material.Grass
+			end
+		end
+		
+		-- Convert shape
+		local ok, _ = pcall(function()
+			if options.detectShapes and part:IsA("WedgePart") then
+				Terrain:FillWedge(part.CFrame, part.Size, mat)
+			elseif options.detectShapes and part:IsA("Part") and part.Shape == Enum.PartType.Ball then
+				local radius = math.min(part.Size.X, part.Size.Y, part.Size.Z) / 2
+				Terrain:FillBall(part.Position, radius, mat)
+			elseif options.detectShapes and part:IsA("Part") and part.Shape == Enum.PartType.Cylinder then
+				local cf = part.CFrame * CFrame.Angles(0, 0, math.rad(90))
+				local height = part.Size.X
+				local radius = math.min(part.Size.Y, part.Size.Z) / 2
+				Terrain:FillCylinder(cf, height, radius, mat)
+			else
+				Terrain:FillBlock(part.CFrame, part.Size, mat)
+			end
+		end)
+		
+		if ok then
+			count += 1
+			if options.deleteParts then
+				part:Destroy()
+			end
+		else
+			failed += 1
+		end
+		
+		-- Batch yielding to keep Studio responsive on large selections
+		if i % 100 == 0 then
+			statusLabel.Text = string.format("Proses: %d / %d part...", i, total)
+			task.wait()
+		end
+	end
+	
+	-- Finish recording for Undo
+	if recordSuccess and recordId then
+		pcall(function()
+			ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+		end)
+	else
+		pcall(function()
+			ChangeHistoryService:SetWaypoint("Convert Parts to Terrain")
+		end)
+	end
+	
+	convertBtn.Text = "⚡ Konversi ke Terrain"
+	convertBtn.AutoButtonColor = true
+	
+	if failed > 0 then
+		statusLabel.Text = string.format("✓ Berhasil %d part (%d gagal).", count, failed)
+		statusLabel.TextColor3 = Color3.fromRGB(240, 160, 40)
+	else
+		statusLabel.Text = string.format("✓ Sukses mengonversi %d part menjadi Terrain!", count)
+		statusLabel.TextColor3 = Color3.fromRGB(0, 180, 100)
+	end
+	
+	updateSelectionCounter()
+end
+
+convertBtn.MouseButton1Click:Connect(convertPartsToTerrain)
+
+undoBtn.MouseButton1Click:Connect(function()
+	local s, _ = pcall(function()
+		ChangeHistoryService:Undo()
+	end)
+	if s then
+		statusLabel.Text = "↩ Konversi terakhir telah dibatalkan (Undo)."
+		statusLabel.TextColor3 = getStudioColor(Enum.StudioStyleGuideColor.SubText)
+		updateSelectionCounter()
+	end
+end)
