@@ -1,0 +1,10 @@
+{
+  "name": "PartToTerrain",
+  "tree": {
+    "$className": "Folder",
+    "PartToTerrain": {
+      "$path": "src"
+    }
+  }
+}
+

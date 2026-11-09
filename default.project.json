@@ -1,9 +1,12 @@
 {
   "name": "PartToTerrain",
   "tree": {
-    "$className": "Folder",
-    "PartToTerrain": {
-      "$path": "src"
+    "$className": "DataModel",
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "PartToTerrain": {
+        "$path": "src"
+      }
     }
   }
 }
