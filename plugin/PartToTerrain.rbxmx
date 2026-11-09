@@ -49,13 +49,23 @@ local widgetInfo = DockWidgetPluginGuiInfo.new(
 )
 
 local widget = plugin:CreateDockWidgetPluginGui("PartConverterWidget_v5", widgetInfo)
-widget.Title = "Part, Mesh & Script Studio"
+widget.Title = "Part, Mesh, CSG & Script Studio"
 widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 -- ==============================================================================
 -- 2. State & Options
 -- ==============================================================================
-local activeTab = "Terrain" -- "Terrain" | "MeshPart" | "Obfuscator"
+local activeTab = "Terrain" -- "Terrain" | "MeshPart" | "CSG" | "Obfuscator"
+
+local csgOptions = {
+	autoSelect = true,        -- Otomatis memilih hasil Union/Negate di Explorer & Viewport
+	includeChildren = true,   -- Cari di dalam Model & Folder
+	preserveName = true,      -- Beri nama rapi pada Union hasil gabungan
+	collisionFidelity = Enum.CollisionFidelity.Default,
+	collisionFidelityName = "Default",
+	renderFidelity = Enum.RenderFidelity.Automatic,
+	renderFidelityName = "Automatic",
+}
 
 local obfOptions = {
 	preset = "Extreme",       -- "Extreme" (Ekstrem) | "Standard" (Standar) | "Minify" (Minify Saja)
@@ -89,6 +99,10 @@ local meshOptions = {
 	deleteParts = true,
 	includeChildren = true,
 	transferChildren = true,
+	-- Bevel / Sudut Tumpul
+	bevelEnabled = false,     -- Terapkan sudut tumpul saat konversi mesh biasa
+	bevelRadius = 0.4,        -- Radius kelengkungan sudut (studs)
+	bevelSegments = 2,        -- 1 = Chamfer (45°), 2 = Halus, 3 = Sangat Halus
 }
 
 local MATERIALS = {
@@ -258,6 +272,178 @@ local function appendBoxGeometry(em: EditableMesh, relCF: CFrame, size: Vector3,
 	addFlatQuad(em, relCF, { Vector3.new(hx, -hy, hz), Vector3.new(hx, -hy, -hz), Vector3.new(hx, hy, -hz), Vector3.new(hx, hy, hz) }, Vector3.new(1, 0, 0), faceColor)
 	-- Left (-X)
 	addFlatQuad(em, relCF, { Vector3.new(-hx, -hy, -hz), Vector3.new(-hx, -hy, hz), Vector3.new(-hx, hy, hz), Vector3.new(-hx, hy, -hz) }, Vector3.new(-1, 0, 0), faceColor)
+end
+
+local function appendBeveledBoxGeometry(
+	em: EditableMesh,
+	relCF: CFrame,
+	size: Vector3,
+	radius: number?,
+	segments: number?,
+	faceColor: Color3?
+)
+	local seg = math.clamp(segments or 2, 1, 5)
+	local sx, sy, sz = size.X, size.Y, size.Z
+	local r = math.clamp(radius or 0.4, 0.01, math.min(sx, sy, sz) * 0.499)
+	local ix = math.max(0, (sx / 2) - r)
+	local iy = math.max(0, (sy / 2) - r)
+	local iz = math.max(0, (sz / 2) - r)
+
+	local cid = faceColor and em:AddColor(faceColor, 1) or nil
+	local defaultUV1 = em:AddUV(Vector2.new(0, 0))
+	local defaultUV2 = em:AddUV(Vector2.new(1, 0))
+	local defaultUV3 = em:AddUV(Vector2.new(1, 1))
+
+	local function addQuad(p1: Vector3, p2: Vector3, p3: Vector3, p4: Vector3, n1: Vector3, n2: Vector3, n3: Vector3, n4: Vector3)
+		local v1 = em:AddVertex(relCF * p1)
+		local v2 = em:AddVertex(relCF * p2)
+		local v3 = em:AddVertex(relCF * p3)
+		local v4 = em:AddVertex(relCF * p4)
+
+		local wn1 = (relCF:VectorToWorldSpace(n1)).Unit
+		local wn2 = (relCF:VectorToWorldSpace(n2)).Unit
+		local wn3 = (relCF:VectorToWorldSpace(n3)).Unit
+		local wn4 = (relCF:VectorToWorldSpace(n4)).Unit
+
+		local nid1 = em:AddNormal(wn1)
+		local nid2 = em:AddNormal(wn2)
+		local nid3 = em:AddNormal(wn3)
+		local nid4 = em:AddNormal(wn4)
+
+		local avgNorm = (n1 + n2 + n3 + n4).Unit
+		local cross = (p2 - p1):Cross(p3 - p1)
+		if cross:Dot(avgNorm) < 0 then
+			local f1 = em:AddTriangle(v1, v3, v2)
+			em:SetFaceNormals(f1, {nid1, nid3, nid2})
+			em:SetFaceUVs(f1, {defaultUV1, defaultUV3, defaultUV2})
+			if cid then em:SetFaceColors(f1, {cid, cid, cid}) end
+
+			local f2 = em:AddTriangle(v1, v4, v3)
+			em:SetFaceNormals(f2, {nid1, nid4, nid3})
+			em:SetFaceUVs(f2, {defaultUV1, defaultUV3, defaultUV2})
+			if cid then em:SetFaceColors(f2, {cid, cid, cid}) end
+		else
+			local f1 = em:AddTriangle(v1, v2, v3)
+			em:SetFaceNormals(f1, {nid1, nid2, nid3})
+			em:SetFaceUVs(f1, {defaultUV1, defaultUV2, defaultUV3})
+			if cid then em:SetFaceColors(f1, {cid, cid, cid}) end
+
+			local f2 = em:AddTriangle(v1, v3, v4)
+			em:SetFaceNormals(f2, {nid1, nid3, nid4})
+			em:SetFaceUVs(f2, {defaultUV1, defaultUV3, defaultUV2})
+			if cid then em:SetFaceColors(f2, {cid, cid, cid}) end
+		end
+	end
+
+	-- 1. 6 Flat Planar Faces (Inset quads)
+	addQuad(Vector3.new(-ix, sy/2, -iz), Vector3.new(ix, sy/2, -iz), Vector3.new(ix, sy/2, iz), Vector3.new(-ix, sy/2, iz), Vector3.new(0,1,0), Vector3.new(0,1,0), Vector3.new(0,1,0), Vector3.new(0,1,0))
+	addQuad(Vector3.new(-ix, -sy/2, iz), Vector3.new(ix, -sy/2, iz), Vector3.new(ix, -sy/2, -iz), Vector3.new(-ix, -sy/2, -iz), Vector3.new(0,-1,0), Vector3.new(0,-1,0), Vector3.new(0,-1,0), Vector3.new(0,-1,0))
+	addQuad(Vector3.new(-ix, -iy, sz/2), Vector3.new(ix, -iy, sz/2), Vector3.new(ix, iy, sz/2), Vector3.new(-ix, iy, sz/2), Vector3.new(0,0,1), Vector3.new(0,0,1), Vector3.new(0,0,1), Vector3.new(0,0,1))
+	addQuad(Vector3.new(ix, -iy, -sz/2), Vector3.new(-ix, -iy, -sz/2), Vector3.new(-ix, iy, -sz/2), Vector3.new(ix, iy, -sz/2), Vector3.new(0,0,-1), Vector3.new(0,0,-1), Vector3.new(0,0,-1), Vector3.new(0,0,-1))
+	addQuad(Vector3.new(sx/2, -iy, iz), Vector3.new(sx/2, -iy, -iz), Vector3.new(sx/2, iy, -iz), Vector3.new(sx/2, iy, iz), Vector3.new(1,0,0), Vector3.new(1,0,0), Vector3.new(1,0,0), Vector3.new(1,0,0))
+	addQuad(Vector3.new(-sx/2, -iy, -iz), Vector3.new(-sx/2, -iy, iz), Vector3.new(-sx/2, iy, iz), Vector3.new(-sx/2, iy, -iz), Vector3.new(-1,0,0), Vector3.new(-1,0,0), Vector3.new(-1,0,0), Vector3.new(-1,0,0))
+
+	-- 2. 12 Cylindrical Edge Bevels
+	local function buildEdgeArc(axis: string, c1: number, c2: number, signA: number, signB: number)
+		for s = 0, seg - 1 do
+			local a1 = (s / seg) * (math.pi / 2)
+			local a2 = ((s + 1) / seg) * (math.pi / 2)
+
+			local cos1, sin1 = math.cos(a1), math.sin(a1)
+			local cos2, sin2 = math.cos(a2), math.sin(a2)
+
+			if axis == "Z" then
+				local offA1, offB1 = signA * (ix + r * cos1), signB * (iy + r * sin1)
+				local offA2, offB2 = signA * (ix + r * cos2), signB * (iy + r * sin2)
+				local norm1 = Vector3.new(signA * cos1, signB * sin1, 0).Unit
+				local norm2 = Vector3.new(signA * cos2, signB * sin2, 0).Unit
+
+				local p1 = Vector3.new(offA1, offB1, -iz)
+				local p2 = Vector3.new(offA1, offB1, iz)
+				local p3 = Vector3.new(offA2, offB2, iz)
+				local p4 = Vector3.new(offA2, offB2, -iz)
+
+				addQuad(p1, p2, p3, p4, norm1, norm1, norm2, norm2)
+			elseif axis == "X" then
+				local offA1, offB1 = signA * (iy + r * cos1), signB * (iz + r * sin1)
+				local offA2, offB2 = signA * (iy + r * cos2), signB * (iz + r * sin2)
+				local norm1 = Vector3.new(0, signA * cos1, signB * sin1).Unit
+				local norm2 = Vector3.new(0, signA * cos2, signB * sin2).Unit
+
+				local p1 = Vector3.new(-ix, offA1, offB1)
+				local p2 = Vector3.new(ix, offA1, offB1)
+				local p3 = Vector3.new(ix, offA2, offB2)
+				local p4 = Vector3.new(-ix, offA2, offB2)
+
+				addQuad(p1, p2, p3, p4, norm1, norm1, norm2, norm2)
+			elseif axis == "Y" then
+				local offA1, offB1 = signA * (iz + r * cos1), signB * (ix + r * sin1)
+				local offA2, offB2 = signA * (iz + r * cos2), signB * (ix + r * sin2)
+				local norm1 = Vector3.new(signB * sin1, 0, signA * cos1).Unit
+				local norm2 = Vector3.new(signB * sin2, 0, signA * cos2).Unit
+
+				local p1 = Vector3.new(offB1, -iy, offA1)
+				local p2 = Vector3.new(offB1, iy, offA1)
+				local p3 = Vector3.new(offB2, iy, offA2)
+				local p4 = Vector3.new(offB2, -iy, offA2)
+
+				addQuad(p1, p2, p3, p4, norm1, norm1, norm2, norm2)
+			end
+		end
+	end
+
+	for _, sx_sign in ipairs({1, -1}) do
+		for _, sy_sign in ipairs({1, -1}) do
+			buildEdgeArc("Z", ix, iy, sx_sign, sy_sign)
+		end
+	end
+
+	for _, sy_sign in ipairs({1, -1}) do
+		for _, sz_sign in ipairs({1, -1}) do
+			buildEdgeArc("X", iy, iz, sy_sign, sz_sign)
+		end
+	end
+
+	for _, sz_sign in ipairs({1, -1}) do
+		for _, sx_sign in ipairs({1, -1}) do
+			buildEdgeArc("Y", iz, ix, sz_sign, sx_sign)
+		end
+	end
+
+	-- 3. 8 Spherical Corner Patches
+	for _, sx_sign in ipairs({1, -1}) do
+		for _, sy_sign in ipairs({1, -1}) do
+			for _, sz_sign in ipairs({1, -1}) do
+				local center = Vector3.new(sx_sign * ix, sy_sign * iy, sz_sign * iz)
+
+				for i = 0, seg - 1 do
+					local theta1 = (i / seg) * (math.pi / 2)
+					local theta2 = ((i + 1) / seg) * (math.pi / 2)
+
+					for j = 0, seg - 1 do
+						local phi1 = (j / seg) * (math.pi / 2)
+						local phi2 = ((j + 1) / seg) * (math.pi / 2)
+
+						local function spherePoint(th: number, ph: number): (Vector3, Vector3)
+							local x = sx_sign * math.cos(th) * math.cos(ph)
+							local y = sy_sign * math.sin(th)
+							local z = sz_sign * math.cos(th) * math.sin(ph)
+							local norm = Vector3.new(x, y, z).Unit
+							local pt = center + norm * r
+							return pt, norm
+						end
+
+						local p1, n1 = spherePoint(theta1, phi1)
+						local p2, n2 = spherePoint(theta1, phi2)
+						local p3, n3 = spherePoint(theta2, phi2)
+						local p4, n4 = spherePoint(theta2, phi1)
+
+						addQuad(p1, p2, p3, p4, n1, n2, n3, n4)
+					end
+				end
+			end
+		end
+	end
 end
 
 local function appendWedgeGeometry(em: EditableMesh, relCF: CFrame, size: Vector3, faceColor: Color3?)
@@ -558,6 +744,12 @@ local allButtons = {}
 local allButtonStrokes = {}
 local allCheckboxes = {}
 
+-- Forward declarations for cross-referencing and dynamic styling
+local btnSeg1: TextButton?, btnSeg2: TextButton?, btnSeg3: TextButton?
+local bs1Stroke: UIStroke?, bs2Stroke: UIStroke?, bs3Stroke: UIStroke?
+local btnBevelAction: TextButton?
+local executeNegateParts, executeUnionParts, executeSeparateUnion, executeBevelParts
+
 local function createCard(name: string, order: number, parentInstance: Instance?)
 	local card = Instance.new("Frame")
 	card.Name = name
@@ -686,15 +878,15 @@ tabButtonRow.Parent = tabCard
 
 local tabLayout = Instance.new("UIListLayout")
 tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.Padding = UDim.new(0, 5)
+tabLayout.Padding = UDim.new(0, 4)
 tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
 tabLayout.Parent = tabButtonRow
 
 local tabTerrainBtn = Instance.new("TextButton")
 tabTerrainBtn.Name = "TabTerrainBtn"
-tabTerrainBtn.Size = UDim2.new(0.333, -4, 1, 0)
+tabTerrainBtn.Size = UDim2.new(0.25, -3, 1, 0)
 tabTerrainBtn.Font = Enum.Font.SourceSansBold
-tabTerrainBtn.TextSize = 12
+tabTerrainBtn.TextSize = 11
 tabTerrainBtn.Text = "⛰️ Terrain"
 tabTerrainBtn.BorderSizePixel = 0
 tabTerrainBtn.AutoButtonColor = false
@@ -711,10 +903,10 @@ tabTerrainBtn.Parent = tabButtonRow
 
 local tabMeshBtn = Instance.new("TextButton")
 tabMeshBtn.Name = "TabMeshBtn"
-tabMeshBtn.Size = UDim2.new(0.333, -4, 1, 0)
+tabMeshBtn.Size = UDim2.new(0.25, -3, 1, 0)
 tabMeshBtn.Font = Enum.Font.SourceSansBold
-tabMeshBtn.TextSize = 12
-tabMeshBtn.Text = "🔷 MeshPart"
+tabMeshBtn.TextSize = 11
+tabMeshBtn.Text = "🔷 Mesh"
 tabMeshBtn.BorderSizePixel = 0
 tabMeshBtn.AutoButtonColor = false
 
@@ -728,12 +920,31 @@ tabMStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 tabMStroke.Parent = tabMeshBtn
 tabMeshBtn.Parent = tabButtonRow
 
+local tabCSGBtn = Instance.new("TextButton")
+tabCSGBtn.Name = "TabCSGBtn"
+tabCSGBtn.Size = UDim2.new(0.25, -3, 1, 0)
+tabCSGBtn.Font = Enum.Font.SourceSansBold
+tabCSGBtn.TextSize = 11
+tabCSGBtn.Text = "🧩 CSG"
+tabCSGBtn.BorderSizePixel = 0
+tabCSGBtn.AutoButtonColor = false
+
+local tabCCorner = Instance.new("UICorner")
+tabCCorner.CornerRadius = UDim.new(0, 4)
+tabCCorner.Parent = tabCSGBtn
+
+local tabCStroke = Instance.new("UIStroke")
+tabCStroke.Thickness = 1
+tabCStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+tabCStroke.Parent = tabCSGBtn
+tabCSGBtn.Parent = tabButtonRow
+
 local tabObfBtn = Instance.new("TextButton")
 tabObfBtn.Name = "TabObfBtn"
-tabObfBtn.Size = UDim2.new(0.333, -4, 1, 0)
+tabObfBtn.Size = UDim2.new(0.25, -3, 1, 0)
 tabObfBtn.Font = Enum.Font.SourceSansBold
-tabObfBtn.TextSize = 12
-tabObfBtn.Text = "🔒 Obfuscator"
+tabObfBtn.TextSize = 11
+tabObfBtn.Text = "🔒 Obf"
 tabObfBtn.BorderSizePixel = 0
 tabObfBtn.AutoButtonColor = false
 
@@ -1451,8 +1662,203 @@ createCheckbox(mOptCard, "Transfer Children, Decal & Attachment", meshOptions.tr
 	meshOptions.transferChildren = val
 end)
 
+-- Bevel / Rounded Part Card
+local mBevelCard, _ = createCard("MeshBevelCard", 5, meshFrame)
+
+local mBevelHeader = Instance.new("TextLabel")
+mBevelHeader.Text = "🔘 PENUMPUL SUDUT PART (BEVEL / ROUNDED BOX)"
+mBevelHeader.Font = Enum.Font.SourceSansBold
+mBevelHeader.TextSize = 12
+mBevelHeader.TextXAlignment = Enum.TextXAlignment.Left
+mBevelHeader.Size = UDim2.new(1, 0, 0, 16)
+mBevelHeader.BackgroundTransparency = 1
+mBevelHeader.LayoutOrder = 1
+mBevelHeader.Parent = mBevelCard
+table.insert(allSubLabels, mBevelHeader)
+
+local mBevelDesc = Instance.new("TextLabel")
+mBevelDesc.Text = "Tumpulkan sudut balok (Block) menjadi melengkung halus dengan geometri procedural."
+mBevelDesc.Font = Enum.Font.SourceSans
+mBevelDesc.TextSize = 11
+mBevelDesc.TextXAlignment = Enum.TextXAlignment.Left
+mBevelDesc.Size = UDim2.new(1, 0, 0, 26)
+mBevelDesc.TextWrapped = true
+mBevelDesc.BackgroundTransparency = 1
+mBevelDesc.LayoutOrder = 2
+mBevelDesc.Parent = mBevelCard
+table.insert(allSubLabels, mBevelDesc)
+
+-- Radius Setting Row
+local bRadRow = Instance.new("Frame")
+bRadRow.Name = "BevelRadiusRow"
+bRadRow.Size = UDim2.new(1, 0, 0, 28)
+bRadRow.BackgroundTransparency = 1
+bRadRow.LayoutOrder = 3
+bRadRow.Parent = mBevelCard
+
+local brLayout = Instance.new("UIListLayout")
+brLayout.FillDirection = Enum.FillDirection.Horizontal
+brLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+brLayout.Padding = UDim.new(0, 8)
+brLayout.Parent = bRadRow
+
+local brLabel = Instance.new("TextLabel")
+brLabel.Text = "Radius Tumpul (Studs):"
+brLabel.Font = Enum.Font.SourceSansSemibold
+brLabel.TextSize = 12
+brLabel.Size = UDim2.new(0.6, -4, 1, 0)
+brLabel.TextXAlignment = Enum.TextXAlignment.Left
+brLabel.BackgroundTransparency = 1
+brLabel.Parent = bRadRow
+table.insert(allLabels, brLabel)
+
+local bevelRadiusInput = Instance.new("TextBox")
+bevelRadiusInput.Name = "BevelRadiusInput"
+bevelRadiusInput.Size = UDim2.new(0.4, -4, 1, 0)
+bevelRadiusInput.Font = Enum.Font.SourceSans
+bevelRadiusInput.TextSize = 12
+bevelRadiusInput.Text = tostring(meshOptions.bevelRadius)
+bevelRadiusInput.PlaceholderText = "0.4"
+bevelRadiusInput.ClearTextOnFocus = false
+bevelRadiusInput.BorderSizePixel = 0
+
+local briCorner = Instance.new("UICorner")
+briCorner.CornerRadius = UDim.new(0, 4)
+briCorner.Parent = bevelRadiusInput
+
+local briStroke = Instance.new("UIStroke")
+briStroke.Thickness = 1
+briStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+briStroke.Parent = bevelRadiusInput
+
+bevelRadiusInput.Parent = bRadRow
+table.insert(allInputs, bevelRadiusInput)
+table.insert(allInputStrokes, briStroke)
+
+bevelRadiusInput.FocusLost:Connect(function()
+	local num = tonumber(bevelRadiusInput.Text)
+	if num and num > 0 then
+		meshOptions.bevelRadius = math.clamp(num, 0.05, 50)
+		bevelRadiusInput.Text = tostring(meshOptions.bevelRadius)
+	else
+		bevelRadiusInput.Text = tostring(meshOptions.bevelRadius)
+	end
+end)
+
+-- Segments Row
+local bSegLabel = Instance.new("TextLabel")
+bSegLabel.Text = "Kehalusan Lengkungan Sudut:"
+bSegLabel.Font = Enum.Font.SourceSansSemibold
+bSegLabel.TextSize = 12
+bSegLabel.Size = UDim2.new(1, 0, 0, 16)
+bSegLabel.TextXAlignment = Enum.TextXAlignment.Left
+bSegLabel.BackgroundTransparency = 1
+bSegLabel.LayoutOrder = 4
+bSegLabel.Parent = mBevelCard
+table.insert(allLabels, bSegLabel)
+
+local bSegRow = Instance.new("Frame")
+bSegRow.Name = "BevelSegRow"
+bSegRow.Size = UDim2.new(1, 0, 0, 26)
+bSegRow.BackgroundTransparency = 1
+bSegRow.LayoutOrder = 5
+bSegRow.Parent = mBevelCard
+
+local bsLayout = Instance.new("UIListLayout")
+bsLayout.FillDirection = Enum.FillDirection.Horizontal
+bsLayout.Padding = UDim.new(0, 4)
+bsLayout.Parent = bSegRow
+
+btnSeg1 = Instance.new("TextButton")
+btnSeg1.Name = "BtnSeg1"
+btnSeg1.Size = UDim2.new(0.33, -3, 1, 0)
+btnSeg1.Font = Enum.Font.SourceSansSemibold
+btnSeg1.TextSize = 11
+btnSeg1.Text = "1 (Chamfer 45°)"
+btnSeg1.BorderSizePixel = 0
+local s1Corner = Instance.new("UICorner")
+s1Corner.CornerRadius = UDim.new(0, 4)
+s1Corner.Parent = btnSeg1
+bs1Stroke = Instance.new("UIStroke")
+bs1Stroke.Thickness = 1
+bs1Stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+bs1Stroke.Parent = btnSeg1
+btnSeg1.Parent = bSegRow
+
+btnSeg2 = Instance.new("TextButton")
+btnSeg2.Name = "BtnSeg2"
+btnSeg2.Size = UDim2.new(0.33, -3, 1, 0)
+btnSeg2.Font = Enum.Font.SourceSansSemibold
+btnSeg2.TextSize = 11
+btnSeg2.Text = "2 (Halus)"
+btnSeg2.BorderSizePixel = 0
+local s2Corner = Instance.new("UICorner")
+s2Corner.CornerRadius = UDim.new(0, 4)
+s2Corner.Parent = btnSeg2
+bs2Stroke = Instance.new("UIStroke")
+bs2Stroke.Thickness = 1
+bs2Stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+bs2Stroke.Parent = btnSeg2
+btnSeg2.Parent = bSegRow
+
+btnSeg3 = Instance.new("TextButton")
+btnSeg3.Name = "BtnSeg3"
+btnSeg3.Size = UDim2.new(0.34, -2, 1, 0)
+btnSeg3.Font = Enum.Font.SourceSansSemibold
+btnSeg3.TextSize = 11
+btnSeg3.Text = "3 (Sangat Halus)"
+btnSeg3.BorderSizePixel = 0
+local s3Corner = Instance.new("UICorner")
+s3Corner.CornerRadius = UDim.new(0, 4)
+s3Corner.Parent = btnSeg3
+bs3Stroke = Instance.new("UIStroke")
+bs3Stroke.Thickness = 1
+bs3Stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+bs3Stroke.Parent = btnSeg3
+btnSeg3.Parent = bSegRow
+
+btnSeg1.MouseButton1Click:Connect(function()
+	meshOptions.bevelSegments = 1
+	applyMonochromeTheme()
+end)
+
+btnSeg2.MouseButton1Click:Connect(function()
+	meshOptions.bevelSegments = 2
+	applyMonochromeTheme()
+end)
+
+btnSeg3.MouseButton1Click:Connect(function()
+	meshOptions.bevelSegments = 3
+	applyMonochromeTheme()
+end)
+
+createCheckbox(mBevelCard, "Terapkan sudut tumpul saat konversi MeshPart biasa", meshOptions.bevelEnabled, 6, function(val)
+	meshOptions.bevelEnabled = val
+end)
+
+btnBevelAction = Instance.new("TextButton")
+btnBevelAction.Name = "BtnBevelAction"
+btnBevelAction.Size = UDim2.new(1, 0, 0, 36)
+btnBevelAction.Font = Enum.Font.SourceSansBold
+btnBevelAction.TextSize = 12
+btnBevelAction.Text = "🔘 TUMPULKAN SUDUT PART TERPILIH (BEVEL)"
+btnBevelAction.BorderSizePixel = 0
+btnBevelAction.LayoutOrder = 7
+btnBevelAction.AutoButtonColor = true
+
+local bbaCorner = Instance.new("UICorner")
+bbaCorner.CornerRadius = UDim.new(0, 5)
+bbaCorner.Parent = btnBevelAction
+btnBevelAction.Parent = mBevelCard
+
+btnBevelAction.MouseButton1Click:Connect(function()
+	if executeBevelParts then
+		executeBevelParts()
+	end
+end)
+
 -- Mesh Action Card
-local mActCard, _ = createCard("MeshActionCard", 5, meshFrame)
+local mActCard, _ = createCard("MeshActionCard", 6, meshFrame)
 
 local convertMeshBtn = Instance.new("TextButton")
 convertMeshBtn.Name = "ConvertMeshBtn"
@@ -1491,6 +1897,71 @@ undoMeshBtn.Parent = mActCard
 table.insert(allButtons, undoMeshBtn)
 table.insert(allButtonStrokes, umStroke)
 
+-- Quick CSG Row in Mesh Tab
+local mQuickCsgRow = Instance.new("Frame")
+mQuickCsgRow.Name = "QuickCsgRow"
+mQuickCsgRow.Size = UDim2.new(1, 0, 0, 26)
+mQuickCsgRow.BackgroundTransparency = 1
+mQuickCsgRow.LayoutOrder = 3
+mQuickCsgRow.Parent = mActCard
+
+local mqLayout = Instance.new("UIListLayout")
+mqLayout.FillDirection = Enum.FillDirection.Horizontal
+mqLayout.Padding = UDim.new(0, 6)
+mqLayout.Parent = mQuickCsgRow
+
+local qNegateBtn = Instance.new("TextButton")
+qNegateBtn.Name = "QNegateBtn"
+qNegateBtn.Size = UDim2.new(0.5, -3, 1, 0)
+qNegateBtn.Font = Enum.Font.SourceSansSemibold
+qNegateBtn.TextSize = 11
+qNegateBtn.Text = "➖ Negate Part"
+qNegateBtn.BorderSizePixel = 0
+
+local qnCorner = Instance.new("UICorner")
+qnCorner.CornerRadius = UDim.new(0, 4)
+qnCorner.Parent = qNegateBtn
+
+local qnStroke = Instance.new("UIStroke")
+qnStroke.Thickness = 1
+qnStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+qnStroke.Parent = qNegateBtn
+qNegateBtn.Parent = mQuickCsgRow
+table.insert(allButtons, qNegateBtn)
+table.insert(allButtonStrokes, qnStroke)
+
+local qUnionBtn = Instance.new("TextButton")
+qUnionBtn.Name = "QUnionBtn"
+qUnionBtn.Size = UDim2.new(0.5, -3, 1, 0)
+qUnionBtn.Font = Enum.Font.SourceSansSemibold
+qUnionBtn.TextSize = 11
+qUnionBtn.Text = "➕ Union Parts"
+qUnionBtn.BorderSizePixel = 0
+
+local quCorner = Instance.new("UICorner")
+quCorner.CornerRadius = UDim.new(0, 4)
+quCorner.Parent = qUnionBtn
+
+local quStroke = Instance.new("UIStroke")
+quStroke.Thickness = 1
+quStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+quStroke.Parent = qUnionBtn
+qUnionBtn.Parent = mQuickCsgRow
+table.insert(allButtons, qUnionBtn)
+table.insert(allButtonStrokes, quStroke)
+
+qNegateBtn.MouseButton1Click:Connect(function()
+	if executeNegateParts then
+		executeNegateParts()
+	end
+end)
+
+qUnionBtn.MouseButton1Click:Connect(function()
+	if executeUnionParts then
+		executeUnionParts()
+	end
+end)
+
 local mStatusLabel = Instance.new("TextLabel")
 mStatusLabel.Name = "MeshStatusLabel"
 mStatusLabel.Size = UDim2.new(1, 0, 0, 36)
@@ -1499,19 +1970,231 @@ mStatusLabel.TextSize = 12
 mStatusLabel.TextWrapped = true
 mStatusLabel.Text = "Siap. Pilih satu atau beberapa part/union lalu klik Konversi."
 mStatusLabel.BackgroundTransparency = 1
-mStatusLabel.LayoutOrder = 3
+mStatusLabel.LayoutOrder = 4
 mStatusLabel.Parent = mActCard
 table.insert(allSubLabels, mStatusLabel)
 
 -- ==============================================================================
--- 7.5. Tab 3: SCRIPT OBFUSCATOR CONTENT
+-- 7.3. Tab 3: CSG TOOLS CONTENT (UNION & NEGATE)
+-- ==============================================================================
+local csgFrame = Instance.new("Frame")
+csgFrame.Name = "CsgFrame"
+csgFrame.Size = UDim2.new(1, 0, 0, 0)
+csgFrame.AutomaticSize = Enum.AutomaticSize.Y
+csgFrame.BackgroundTransparency = 1
+csgFrame.LayoutOrder = 5
+csgFrame.Visible = false
+csgFrame.Parent = mainContainer
+
+local csgLayout = Instance.new("UIListLayout")
+csgLayout.Padding = UDim.new(0, 10)
+csgLayout.SortOrder = Enum.SortOrder.LayoutOrder
+csgLayout.Parent = csgFrame
+
+-- 1. Main Action Card
+local csgActCard, _ = createCard("CsgActionCard", 1, csgFrame)
+
+local csgActHeader = Instance.new("TextLabel")
+csgActHeader.Text = "OPERASI UTAMA CSG (UNION & NEGATE)"
+csgActHeader.Font = Enum.Font.SourceSansBold
+csgActHeader.TextSize = 12
+csgActHeader.TextXAlignment = Enum.TextXAlignment.Left
+csgActHeader.Size = UDim2.new(1, 0, 0, 16)
+csgActHeader.BackgroundTransparency = 1
+csgActHeader.LayoutOrder = 1
+csgActHeader.Parent = csgActCard
+table.insert(allSubLabels, csgActHeader)
+
+-- Negate Button
+local btnNegate = Instance.new("TextButton")
+btnNegate.Name = "BtnNegate"
+btnNegate.Size = UDim2.new(1, 0, 0, 36)
+btnNegate.Font = Enum.Font.SourceSansBold
+btnNegate.TextSize = 13
+btnNegate.Text = "➖ NEGATE PART (UBAH KE NEGATIF / POSITIF)"
+btnNegate.BorderSizePixel = 0
+btnNegate.AutoButtonColor = true
+btnNegate.LayoutOrder = 2
+
+local bnCorner = Instance.new("UICorner")
+bnCorner.CornerRadius = UDim.new(0, 5)
+bnCorner.Parent = btnNegate
+btnNegate.Parent = csgActCard
+
+local negateDescLabel = Instance.new("TextLabel")
+negateDescLabel.Name = "NegateDesc"
+negateDescLabel.Size = UDim2.new(1, 0, 0, 26)
+negateDescLabel.Font = Enum.Font.SourceSans
+negateDescLabel.TextSize = 11
+negateDescLabel.TextWrapped = true
+negateDescLabel.TextXAlignment = Enum.TextXAlignment.Left
+negateDescLabel.Text = "Ubah part menjadi NegateOperation transparan kemerahan untuk memotong/melubangi objek lain (klik lagi untuk mengembalikan)."
+negateDescLabel.BackgroundTransparency = 1
+negateDescLabel.LayoutOrder = 3
+negateDescLabel.Parent = csgActCard
+table.insert(allSubLabels, negateDescLabel)
+
+-- Union Button
+local btnUnion = Instance.new("TextButton")
+btnUnion.Name = "BtnUnion"
+btnUnion.Size = UDim2.new(1, 0, 0, 36)
+btnUnion.Font = Enum.Font.SourceSansBold
+btnUnion.TextSize = 13
+btnUnion.Text = "➕ UNION PARTS (GABUNG JADI 1 UNION)"
+btnUnion.BorderSizePixel = 0
+btnUnion.AutoButtonColor = true
+btnUnion.LayoutOrder = 4
+
+local buCorner = Instance.new("UICorner")
+buCorner.CornerRadius = UDim.new(0, 5)
+buCorner.Parent = btnUnion
+btnUnion.Parent = csgActCard
+
+local unionDescLabel = Instance.new("TextLabel")
+unionDescLabel.Name = "UnionDesc"
+unionDescLabel.Size = UDim2.new(1, 0, 0, 26)
+unionDescLabel.Font = Enum.Font.SourceSans
+unionDescLabel.TextSize = 11
+unionDescLabel.TextWrapped = true
+unionDescLabel.TextXAlignment = Enum.TextXAlignment.Left
+unionDescLabel.Text = "Gabungkan part terpilih (dan part negatif pemotong) menjadi 1 UnionOperation solid."
+unionDescLabel.BackgroundTransparency = 1
+unionDescLabel.LayoutOrder = 5
+unionDescLabel.Parent = csgActCard
+table.insert(allSubLabels, unionDescLabel)
+
+-- Secondary Action Row (Separate & Convert to MeshPart)
+local csgSecRow = Instance.new("Frame")
+csgSecRow.Name = "CsgSecRow"
+csgSecRow.Size = UDim2.new(1, 0, 0, 28)
+csgSecRow.BackgroundTransparency = 1
+csgSecRow.LayoutOrder = 6
+csgSecRow.Parent = csgActCard
+
+local csrLayout = Instance.new("UIListLayout")
+csrLayout.FillDirection = Enum.FillDirection.Horizontal
+csrLayout.Padding = UDim.new(0, 6)
+csrLayout.Parent = csgSecRow
+
+local btnSeparate = Instance.new("TextButton")
+btnSeparate.Name = "BtnSeparate"
+btnSeparate.Size = UDim2.new(0.5, -3, 1, 0)
+btnSeparate.Font = Enum.Font.SourceSansSemibold
+btnSeparate.TextSize = 11
+btnSeparate.Text = "✂️ Pisahkan (Separate)"
+btnSeparate.BorderSizePixel = 0
+btnSeparate.AutoButtonColor = true
+
+local sepCorner = Instance.new("UICorner")
+sepCorner.CornerRadius = UDim.new(0, 4)
+sepCorner.Parent = btnSeparate
+
+local sepStroke = Instance.new("UIStroke")
+sepStroke.Thickness = 1
+sepStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+sepStroke.Parent = btnSeparate
+btnSeparate.Parent = csgSecRow
+table.insert(allButtons, btnSeparate)
+table.insert(allButtonStrokes, sepStroke)
+
+local btnUnionToMesh = Instance.new("TextButton")
+btnUnionToMesh.Name = "BtnUnionToMesh"
+btnUnionToMesh.Size = UDim2.new(0.5, -3, 1, 0)
+btnUnionToMesh.Font = Enum.Font.SourceSansSemibold
+btnUnionToMesh.TextSize = 11
+btnUnionToMesh.Text = "🔷 Convert ke MeshPart"
+btnUnionToMesh.BorderSizePixel = 0
+btnUnionToMesh.AutoButtonColor = true
+
+local utmCorner = Instance.new("UICorner")
+utmCorner.CornerRadius = UDim.new(0, 4)
+utmCorner.Parent = btnUnionToMesh
+
+local utmStroke = Instance.new("UIStroke")
+utmStroke.Thickness = 1
+utmStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+utmStroke.Parent = btnUnionToMesh
+btnUnionToMesh.Parent = csgSecRow
+table.insert(allButtons, btnUnionToMesh)
+table.insert(allButtonStrokes, utmStroke)
+
+local csgStatusLabel = Instance.new("TextLabel")
+csgStatusLabel.Name = "CsgStatusLabel"
+csgStatusLabel.Size = UDim2.new(1, 0, 0, 36)
+csgStatusLabel.Font = Enum.Font.SourceSans
+csgStatusLabel.TextSize = 12
+csgStatusLabel.TextWrapped = true
+csgStatusLabel.Text = "Siap. Pilih part lalu klik Negate atau Union."
+csgStatusLabel.BackgroundTransparency = 1
+csgStatusLabel.LayoutOrder = 7
+csgStatusLabel.Parent = csgActCard
+table.insert(allSubLabels, csgStatusLabel)
+
+-- 2. CSG Options Card
+local csgOptCard, _ = createCard("CsgOptionsCard", 2, csgFrame)
+
+local csgOptHeader = Instance.new("TextLabel")
+csgOptHeader.Text = "PILIHAN CSG & FIDELITY"
+csgOptHeader.Font = Enum.Font.SourceSansBold
+csgOptHeader.TextSize = 12
+csgOptHeader.TextXAlignment = Enum.TextXAlignment.Left
+csgOptHeader.Size = UDim2.new(1, 0, 0, 16)
+csgOptHeader.BackgroundTransparency = 1
+csgOptHeader.LayoutOrder = 1
+csgOptHeader.Parent = csgOptCard
+table.insert(allSubLabels, csgOptHeader)
+
+createCheckbox(csgOptCard, "Pilih otomatis hasil Union / Negate di Explorer", csgOptions.autoSelect, 2, function(val)
+	csgOptions.autoSelect = val
+end)
+
+createCheckbox(csgOptCard, "Cari di dalam Model & Folder", csgOptions.includeChildren, 3, function(val)
+	csgOptions.includeChildren = val
+	if updateSelectionCounter then
+		updateSelectionCounter()
+	end
+end)
+
+createCheckbox(csgOptCard, "Beri nama rapi pada Union hasil (_Union)", csgOptions.preserveName, 4, function(val)
+	csgOptions.preserveName = val
+end)
+
+-- 3. CSG Quick Guide Card
+local csgGuideCard, _ = createCard("CsgGuideCard", 3, csgFrame)
+
+local csgGuideHeader = Instance.new("TextLabel")
+csgGuideHeader.Text = "💡 PANDUAN CEPAT MEMBUAT LUBANG / POTONGAN"
+csgGuideHeader.Font = Enum.Font.SourceSansBold
+csgGuideHeader.TextSize = 12
+csgGuideHeader.TextXAlignment = Enum.TextXAlignment.Left
+csgGuideHeader.Size = UDim2.new(1, 0, 0, 16)
+csgGuideHeader.BackgroundTransparency = 1
+csgGuideHeader.LayoutOrder = 1
+csgGuideHeader.Parent = csgGuideCard
+table.insert(allSubLabels, csgGuideHeader)
+
+local csgGuideText = Instance.new("TextLabel")
+csgGuideText.Name = "CsgGuideText"
+csgGuideText.Size = UDim2.new(1, 0, 0, 68)
+csgGuideText.Font = Enum.Font.SourceSans
+csgGuideText.TextSize = 12
+csgGuideText.TextWrapped = true
+csgGuideText.TextXAlignment = Enum.TextXAlignment.Left
+csgGuideText.Text = "1. Buat Part pemotong (misal Cylinder), posisikan menembus Part utama.\n2. Pilih Part pemotong lalu klik '➖ Negate Part'.\n3. Pilih Part utama bersamaan dengan Part negatif tadi.\n4. Klik '➕ Union Parts' untuk menghasilkan potongan/lubang solid!"
+csgGuideText.BackgroundTransparency = 1
+csgGuideText.LayoutOrder = 2
+csgGuideText.Parent = csgGuideCard
+table.insert(allSubLabels, csgGuideText)
+
+-- ==============================================================================
+-- 7.5. Tab 4: SCRIPT OBFUSCATOR CONTENT
 -- ==============================================================================
 local obfFrame = Instance.new("Frame")
 obfFrame.Name = "ObfFrame"
 obfFrame.Size = UDim2.new(1, 0, 0, 0)
 obfFrame.AutomaticSize = Enum.AutomaticSize.Y
 obfFrame.BackgroundTransparency = 1
-obfFrame.LayoutOrder = 5
+obfFrame.LayoutOrder = 6
 obfFrame.Visible = false
 obfFrame.Parent = mainContainer
 
@@ -1787,44 +2470,32 @@ local function applyMonochromeTheme()
 	convertMeshBtn.TextColor3 = pal.btnPrimaryText
 	convertObfBtn.BackgroundColor3 = pal.btnPrimaryBg
 	convertObfBtn.TextColor3 = pal.btnPrimaryText
+	btnNegate.BackgroundColor3 = pal.btnPrimaryBg
+	btnNegate.TextColor3 = pal.btnPrimaryText
+	btnUnion.BackgroundColor3 = pal.btnPrimaryBg
+	btnUnion.TextColor3 = pal.btnPrimaryText
+	if btnBevelAction then
+		btnBevelAction.BackgroundColor3 = pal.btnPrimaryBg
+		btnBevelAction.TextColor3 = pal.btnPrimaryText
+	end
 
-	-- Tab Buttons Styling (3 Tabs: Terrain, MeshPart, Obfuscator)
-	if activeTab == "Terrain" then
-		tabTerrainBtn.BackgroundColor3 = pal.tabActiveBg
-		tabTerrainBtn.TextColor3 = pal.tabActiveText
-		tabTStroke.Color = pal.tabActiveBg
-
-		tabMeshBtn.BackgroundColor3 = pal.tabInactiveBg
-		tabMeshBtn.TextColor3 = pal.tabInactiveText
-		tabMStroke.Color = pal.tabInactiveBorder
-
-		tabObfBtn.BackgroundColor3 = pal.tabInactiveBg
-		tabObfBtn.TextColor3 = pal.tabInactiveText
-		tabOStroke.Color = pal.tabInactiveBorder
-	elseif activeTab == "MeshPart" then
-		tabMeshBtn.BackgroundColor3 = pal.tabActiveBg
-		tabMeshBtn.TextColor3 = pal.tabActiveText
-		tabMStroke.Color = pal.tabActiveBg
-
-		tabTerrainBtn.BackgroundColor3 = pal.tabInactiveBg
-		tabTerrainBtn.TextColor3 = pal.tabInactiveText
-		tabTStroke.Color = pal.tabInactiveBorder
-
-		tabObfBtn.BackgroundColor3 = pal.tabInactiveBg
-		tabObfBtn.TextColor3 = pal.tabInactiveText
-		tabOStroke.Color = pal.tabInactiveBorder
-	else -- "Obfuscator"
-		tabObfBtn.BackgroundColor3 = pal.tabActiveBg
-		tabObfBtn.TextColor3 = pal.tabActiveText
-		tabOStroke.Color = pal.tabActiveBg
-
-		tabTerrainBtn.BackgroundColor3 = pal.tabInactiveBg
-		tabTerrainBtn.TextColor3 = pal.tabInactiveText
-		tabTStroke.Color = pal.tabInactiveBorder
-
-		tabMeshBtn.BackgroundColor3 = pal.tabInactiveBg
-		tabMeshBtn.TextColor3 = pal.tabInactiveText
-		tabMStroke.Color = pal.tabInactiveBorder
+	-- Tab Buttons Styling (4 Tabs: Terrain, MeshPart, CSG, Obfuscator)
+	local tabList = {
+		{ name = "Terrain", btn = tabTerrainBtn, str = tabTStroke },
+		{ name = "MeshPart", btn = tabMeshBtn, str = tabMStroke },
+		{ name = "CSG", btn = tabCSGBtn, str = tabCStroke },
+		{ name = "Obfuscator", btn = tabObfBtn, str = tabOStroke },
+	}
+	for _, t in ipairs(tabList) do
+		if activeTab == t.name then
+			t.btn.BackgroundColor3 = pal.tabActiveBg
+			t.btn.TextColor3 = pal.tabActiveText
+			t.str.Color = pal.tabActiveBg
+		else
+			t.btn.BackgroundColor3 = pal.tabInactiveBg
+			t.btn.TextColor3 = pal.tabInactiveText
+			t.str.Color = pal.tabInactiveBorder
+		end
 	end
 
 	-- Obfuscator Preset Buttons
@@ -1919,6 +2590,23 @@ local function applyMonochromeTheme()
 		modeAutoBtn.TextColor3 = pal.tabInactiveText
 		maStroke.Color = pal.tabInactiveBorder
 	end
+
+	-- Bevel Segment Buttons
+	if btnSeg1 and btnSeg2 and btnSeg3 and bs1Stroke and bs2Stroke and bs3Stroke then
+		local segList = { { btnSeg1, bs1Stroke, 1 }, { btnSeg2, bs2Stroke, 2 }, { btnSeg3, bs3Stroke, 3 } }
+		for _, item in ipairs(segList) do
+			local b, s, val = item[1], item[2], item[3]
+			if meshOptions.bevelSegments == val then
+				b.BackgroundColor3 = pal.tabActiveBg
+				b.TextColor3 = pal.tabActiveText
+				s.Color = pal.tabActiveBg
+			else
+				b.BackgroundColor3 = pal.tabInactiveBg
+				b.TextColor3 = pal.tabInactiveText
+				s.Color = pal.tabInactiveBorder
+			end
+		end
+	end
 end
 
 local function setPreset(presetName: string)
@@ -1969,6 +2657,7 @@ local function setTab(tabName: string)
 	activeTab = tabName
 	terrainFrame.Visible = (tabName == "Terrain")
 	meshFrame.Visible = (tabName == "MeshPart")
+	csgFrame.Visible = (tabName == "CSG")
 	obfFrame.Visible = (tabName == "Obfuscator")
 	applyMonochromeTheme()
 	if updateSelectionCounter then
@@ -1982,6 +2671,10 @@ end)
 
 tabMeshBtn.MouseButton1Click:Connect(function()
 	setTab("MeshPart")
+end)
+
+tabCSGBtn.MouseButton1Click:Connect(function()
+	setTab("CSG")
 end)
 
 tabObfBtn.MouseButton1Click:Connect(function()
@@ -2049,6 +2742,39 @@ local function getTargetParts(includeChildren: boolean): ({ BasePart }, number)
 	return parts, unionCount
 end
 
+local function getTargetCSGParts(includeChildren: boolean): ({ BasePart }, number, number, number)
+	local selected = Selection:Get()
+	local parts: { BasePart } = {}
+	local seen = {}
+	local normalCount = 0
+	local unionCount = 0
+	local negateCount = 0
+
+	local function scan(list: { Instance })
+		for _, item in ipairs(list) do
+			if item:IsA("BasePart") and not item:IsA("Terrain") then
+				if not seen[item] then
+					seen[item] = true
+					table.insert(parts, item)
+					if item:IsA("NegateOperation") then
+						negateCount += 1
+					elseif item:IsA("UnionOperation") then
+						unionCount += 1
+					else
+						normalCount += 1
+					end
+				end
+			end
+			if includeChildren and (item:IsA("Model") or item:IsA("Folder") or item:IsA("Configuration") or item:IsA("Workspace")) then
+				scan(item:GetChildren())
+			end
+		end
+	end
+
+	scan(selected)
+	return parts, normalCount, unionCount, negateCount
+end
+
 local function getTargetScripts(includeChildren: boolean): ({ LuaSourceContainer }, { Script: number, LocalScript: number, ModuleScript: number })
 	local selected = Selection:Get()
 	local scripts: { LuaSourceContainer } = {}
@@ -2094,6 +2820,22 @@ function updateSelectionCounter()
 		else
 			selSubLabel.Text = string.format("Siap diobfuscate (%d Script, %d LocalScript, %d ModuleScript).",
 				counts.Script, counts.LocalScript, counts.ModuleScript)
+		end
+		return
+	elseif activeTab == "CSG" then
+		local parts, normalCount, unionCount, negateCount = getTargetCSGParts(csgOptions.includeChildren)
+		local count = #parts
+		if negateCount > 0 or unionCount > 0 then
+			selCountLabel.Text = string.format("Part Terpilih: %d (%d Union, %d Negatif)", count, unionCount, negateCount)
+		else
+			selCountLabel.Text = string.format("Part Terpilih: %d", count)
+		end
+
+		if count == 0 then
+			selSubLabel.Text = "Pilih Part untuk dijadikan Negatif, atau gabungkan Part & Negatif menjadi Union."
+		else
+			selSubLabel.Text = string.format("Siap memproses CSG: %d Part biasa, %d Negatif, %d Union.",
+				normalCount, negateCount, unionCount)
 		end
 		return
 	end
@@ -2255,7 +2997,11 @@ local function appendPartToMesh(em: EditableMesh, baseCF: CFrame, part: BasePart
 	elseif part:IsA("Part") and part.Shape == Enum.PartType.Cylinder then
 		appendCylinderGeometry(em, relCF, part.Size, 24, faceColor)
 	else
-		appendBoxGeometry(em, relCF, part.Size, faceColor)
+		if meshOptions.bevelEnabled and (part:IsA("Part") and (part.Shape == Enum.PartType.Block or part.Shape == nil)) then
+			appendBeveledBoxGeometry(em, relCF, part.Size, meshOptions.bevelRadius, meshOptions.bevelSegments, faceColor)
+		else
+			appendBoxGeometry(em, relCF, part.Size, faceColor)
+		end
 	end
 end
 
@@ -2603,6 +3349,283 @@ undoMeshBtn.MouseButton1Click:Connect(function()
 		mStatusLabel.Text = "↩ Konversi MeshPart terakhir telah dibatalkan (Undo)."
 		updateSelectionCounter()
 	end
+end)
+
+function executeBevelParts()
+	local parts, unionCount = getTargetParts(meshOptions.includeChildren)
+	local total = #parts
+	if total == 0 then
+		mStatusLabel.Text = "⚠️ Pilih minimal 1 balok Part di Workspace untuk ditumpulkan sudutnya."
+		return
+	end
+
+	local targetParts = {}
+	for _, p in ipairs(parts) do
+		if p:IsA("Part") and (p.Shape == Enum.PartType.Block or p.Shape == nil) then
+			table.insert(targetParts, p)
+		end
+	end
+
+	if #targetParts == 0 then
+		mStatusLabel.Text = "⚠️ Dari " .. total .. " item yang dipilih, tidak ada balok Part (Block) untuk ditumpulkan."
+		return
+	end
+
+	local recordSuccess, recordId = pcall(function()
+		return ChangeHistoryService:TryBeginRecording("Bevel Part Corners")
+	end)
+
+	if btnBevelAction then
+		btnBevelAction.Text = "⏳ MEMPROSES TUMPUL SUDUT..."
+		btnBevelAction.AutoButtonColor = false
+	end
+
+	local count = 0
+	local failed = 0
+	local newSelection = {}
+
+	for i, part in ipairs(targetParts) do
+		local em = AssetService:CreateEditableMesh()
+		appendBeveledBoxGeometry(em, CFrame.identity, part.Size, meshOptions.bevelRadius, meshOptions.bevelSegments, nil)
+
+		local s, mp = pcall(function()
+			return AssetService:CreateMeshPartAsync(Content.fromObject(em), {
+				CollisionFidelity = meshOptions.collisionFidelity,
+				RenderFidelity = meshOptions.renderFidelity,
+			})
+		end)
+
+		if s and mp and mp:IsA("MeshPart") then
+			count += 1
+			mp.Name = part.Name .. "_Rounded"
+			mp.Size = part.Size
+			mp.CFrame = part.CFrame
+			mp.Color = part.Color
+			mp.Material = part.Material
+			pcall(function()
+				mp.MaterialVariant = part.MaterialVariant
+			end)
+			mp.Transparency = part.Transparency
+			mp.Reflectance = part.Reflectance
+			mp.CastShadow = part.CastShadow
+			mp.CanCollide = part.CanCollide
+			mp.CanTouch = part.CanTouch
+			mp.CanQuery = part.CanQuery
+			mp.Anchored = part.Anchored
+			pcall(function()
+				mp.CollisionGroup = part.CollisionGroup
+			end)
+
+			for k, v in pairs(part:GetAttributes()) do
+				mp:SetAttribute(k, v)
+			end
+			for _, tag in ipairs(CollectionService:GetTags(part)) do
+				CollectionService:AddTag(mp, tag)
+			end
+
+			if meshOptions.transferChildren then
+				for _, child in ipairs(part:GetChildren()) do
+					if not child:IsA("SpecialMesh") and not child:IsA("FileMesh") then
+						child.Parent = mp
+					end
+				end
+			end
+
+			mp.Parent = part.Parent
+
+			if meshOptions.deleteParts then
+				part:Destroy()
+			end
+
+			table.insert(newSelection, mp)
+		else
+			failed += 1
+		end
+
+		if i % 10 == 0 then
+			mStatusLabel.Text = string.format("Memproses bevel: %d / %d...", i, #targetParts)
+			task.wait()
+		end
+	end
+
+	if #newSelection > 0 then
+		pcall(function()
+			Selection:Set(newSelection)
+		end)
+	end
+
+	if failed > 0 then
+		mStatusLabel.Text = string.format("✓ Selesai Bevel: %d berhasil (%d gagal). Radius: %.2f studs.", count, failed, meshOptions.bevelRadius)
+	else
+		mStatusLabel.Text = string.format("✓ Sukses menumpulkan %d Part! (Radius: %.2f studs, Segmen: %d)", count, meshOptions.bevelRadius, meshOptions.bevelSegments)
+	end
+
+	if recordSuccess and recordId then
+		pcall(function()
+			ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+		end)
+	else
+		pcall(function()
+			ChangeHistoryService:SetWaypoint("Bevel Part Corners")
+		end)
+	end
+
+	if btnBevelAction then
+		btnBevelAction.Text = "🔘 TUMPULKAN SUDUT PART TERPILIH (BEVEL)"
+		btnBevelAction.AutoButtonColor = true
+	end
+	applyMonochromeTheme()
+	updateSelectionCounter()
+end
+
+-- ==============================================================================
+-- 12.3. CSG Operations Implementation (Negate, Union, & Separate)
+-- ==============================================================================
+function executeNegateParts()
+	local parts, normalCount, unionCount, negateCount = getTargetCSGParts(csgOptions.includeChildren)
+	local total = #parts
+	if total == 0 then
+		csgStatusLabel.Text = "⚠️ Pilih minimal 1 Part atau NegateOperation untuk di-Negate."
+		return
+	end
+
+	local recordSuccess, recordId = pcall(function()
+		return ChangeHistoryService:TryBeginRecording("Negate Part(s)")
+	end)
+
+	local ok, newItems = pcall(function()
+		return plugin:Negate(parts)
+	end)
+
+	if recordSuccess and recordId then
+		pcall(function()
+			ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+		end)
+	end
+
+	if ok and newItems and #newItems > 0 then
+		if csgOptions.autoSelect then
+			pcall(function()
+				Selection:Set(newItems)
+			end)
+		end
+		local isNeg = newItems[1]:IsA("NegateOperation")
+		csgStatusLabel.Text = string.format("✓ Berhasil mengubah %d part menjadi %s!",
+			#newItems, isNeg and "Negatif (NegateOperation)" or "Part biasa")
+	else
+		csgStatusLabel.Text = "❌ Gagal melakukan operasi Negate: " .. tostring(newItems)
+	end
+
+	updateSelectionCounter()
+end
+
+function executeUnionParts()
+	local parts, normalCount, unionCount, negateCount = getTargetCSGParts(csgOptions.includeChildren)
+	local total = #parts
+	if total == 0 then
+		csgStatusLabel.Text = "⚠️ Pilih minimal 1 part untuk diubah menjadi UnionOperation."
+		return
+	end
+
+	btnUnion.Text = "⏳ MEMPROSES UNION..."
+	btnUnion.AutoButtonColor = false
+
+	local recordSuccess, recordId = pcall(function()
+		return ChangeHistoryService:TryBeginRecording("Union Parts")
+	end)
+
+	local ok, unionRes = pcall(function()
+		return plugin:Union(parts)
+	end)
+
+	if recordSuccess and recordId then
+		pcall(function()
+			ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+		end)
+	end
+
+	btnUnion.Text = "➕ UNION PARTS (GABUNG JADI 1 UNION)"
+	btnUnion.AutoButtonColor = true
+	applyMonochromeTheme()
+
+	if ok and unionRes and unionRes:IsA("UnionOperation") then
+		pcall(function()
+			unionRes.CollisionFidelity = csgOptions.collisionFidelity
+			unionRes.RenderFidelity = csgOptions.renderFidelity
+			if csgOptions.preserveName and parts[1] then
+				unionRes.Name = parts[1].Name .. "_Union"
+			end
+			if csgOptions.autoSelect then
+				Selection:Set({ unionRes })
+			end
+		end)
+
+		if negateCount > 0 then
+			csgStatusLabel.Text = string.format("✓ Sukses memotong & menggabungkan %d part (%d Negatif) menjadi 1 UnionOperation!", total, negateCount)
+		else
+			csgStatusLabel.Text = string.format("✓ Sukses menggabungkan %d part menjadi 1 UnionOperation (%s)!", total, unionRes.Name)
+		end
+	else
+		csgStatusLabel.Text = "❌ Gagal menggabungkan menjadi Union: " .. tostring(unionRes)
+	end
+
+	updateSelectionCounter()
+end
+
+function executeSeparateUnion()
+	local selected = Selection:Get()
+	local unions: { UnionOperation } = {}
+
+	local function scan(list: { Instance })
+		for _, item in ipairs(list) do
+			if item:IsA("UnionOperation") then
+				table.insert(unions, item)
+			elseif csgOptions.includeChildren and (item:IsA("Model") or item:IsA("Folder")) then
+				scan(item:GetChildren())
+			end
+		end
+	end
+	scan(selected)
+
+	if #unions == 0 then
+		csgStatusLabel.Text = "⚠️ Pilih minimal 1 UnionOperation untuk dipisahkan (Separate)."
+		return
+	end
+
+	local recordSuccess, recordId = pcall(function()
+		return ChangeHistoryService:TryBeginRecording("Separate Union(s)")
+	end)
+
+	local ok, separated = pcall(function()
+		return plugin:Separate(unions)
+	end)
+
+	if recordSuccess and recordId then
+		pcall(function()
+			ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+		end)
+	end
+
+	if ok and separated and #separated > 0 then
+		if csgOptions.autoSelect then
+			pcall(function()
+				Selection:Set(separated)
+			end)
+		end
+		csgStatusLabel.Text = string.format("✓ Sukses memisahkan %d Union menjadi %d part konstituen!", #unions, #separated)
+	else
+		csgStatusLabel.Text = "❌ Gagal memisahkan Union: " .. tostring(separated)
+	end
+
+	updateSelectionCounter()
+end
+
+btnNegate.MouseButton1Click:Connect(executeNegateParts)
+btnUnion.MouseButton1Click:Connect(executeUnionParts)
+btnSeparate.MouseButton1Click:Connect(executeSeparateUnion)
+btnUnionToMesh.MouseButton1Click:Connect(function()
+	setTab("MeshPart")
+	executeMeshConversion()
 end)
 
 -- ==============================================================================
